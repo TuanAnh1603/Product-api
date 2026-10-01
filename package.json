@@ -1,0 +1,21 @@
+{
+  "name": "product-api",
+  "version": "1.1.0",
+  "description": "RESTful Product CRUD API with Express, Mongoose and MongoDB",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "type": "commonjs",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "mongoose": "^9.10.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

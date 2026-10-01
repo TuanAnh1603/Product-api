@@ -1,0 +1,101 @@
+name: Product API - Production CI and CD
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports: ['27017:27017']
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 10s --health-timeout 5s --health-retries 10 --health-start-period 15s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start production API
+        env:
+          PORT: 3000
+          MONGO_URI: mongodb://127.0.0.1:27017/productdb
+        run: nohup npm start >/tmp/product-api.log 2>&1 &
+      - name: Wait for database-backed healthcheck
+        run: |
+          for i in $(seq 1 30); do
+            if curl --fail http://127.0.0.1:3000/health; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/product-api.log
+          exit 1
+      - name: CRUD integration tests
+        run: npm test
+        env:
+          API_URL: http://127.0.0.1:3000
+      - name: Build container image
+        run: docker build -t product-api:ci .
+      - name: Verify container healthcheck
+        run: |
+          docker run -d --name ci-mongo mongo:7
+          for i in $(seq 1 30); do docker exec ci-mongo mongosh --quiet --eval 'db.adminCommand("ping").ok' && break || sleep 2; done
+          docker network create ci-net
+          docker network connect ci-net ci-mongo
+          docker run -d --name ci-api --network ci-net -e MONGO_URI=mongodb://ci-mongo:27017/productdb -p 3001:3000 product-api:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' ci-api 2>/dev/null || true)
+            [ "$status" = healthy ] && exit 0
+            [ "$status" = unhealthy ] && docker logs ci-api && exit 1
+            sleep 2
+          done
+          docker logs ci-api
+          exit 1
+      - name: Cleanup containers
+        if: always()
+        run: docker rm -f ci-api ci-mongo 2>/dev/null || true
+
+  publish:
+    needs: integration-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/product-api:latest
+            ${{ secrets.DOCKER_USERNAME }}/product-api:${{ github.sha }}
+
+  deploy-local:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, product-api-local]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy image on local Docker Engine
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker compose -f docker-compose-prod.yaml pull
+          docker compose -f docker-compose-prod.yaml up -d --remove-orphans
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' product-api-prod-container 2>/dev/null || true)
+            [ "$status" = healthy ] && exit 0
+            [ "$status" = unhealthy ] && docker logs product-api-prod-container && exit 1
+            sleep 2
+          done
+          docker logs product-api-prod-container
+          exit 1
